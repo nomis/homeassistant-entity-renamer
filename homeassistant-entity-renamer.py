@@ -75,6 +75,10 @@ def rename_entities(entity_data, search_regex, replace_regex):
         new_entity_id = re.sub(search_regex, replace_regex, entity_id)
         renamed_data.append((friendly_name, entity_id, new_entity_id))
 
+    if not renamed_data:
+        print("No matching entities found")
+        return
+
     # Print the table with friendly name and entity ID
     table = [("Friendly Name", "Current Entity ID", "New Entity ID")] + align_strings_in_column(align_strings_in_column(renamed_data, 1), 2)
     print(tabulate.tabulate(table, headers="firstrow", tablefmt="github"))
@@ -96,6 +100,7 @@ def rename_entities(entity_data, search_regex, replace_regex):
             auth_result = json.loads(auth_result)
             if auth_result["type"] != "auth_ok":
                 print("Authentication failed. Check your access token.")
+                ws.close()
                 return
 
             # Rename the entities
@@ -119,10 +124,69 @@ def rename_entities(entity_data, search_regex, replace_regex):
             print("Renaming process aborted.")
 
 
+def rename_file(entity_data, file):
+    with open(file, "r") as f:
+        renames = json.load(f)
+
+    renamed_data = []
+    for friendly_name, old_entity_id in entity_data:
+        for entity_id in renames:
+            new_entity_id, new_friendly_name = renames[entity_id]
+            if old_entity_id in (entity_id, new_entity_id):
+                renamed_data.append((friendly_name, new_friendly_name, old_entity_id, new_entity_id))
+
+    if not renamed_data:
+        print("No matching entities found")
+        return
+
+    table = [("Friendly Name", "New Friendly Name", "Current Entity ID", "New Entity ID")] + align_strings_in_column(align_strings_in_column(renamed_data, 2), 3)
+    print(tabulate.tabulate(table, headers="firstrow", tablefmt="github"))
+
+    answer = input("\nDo you want to proceed with renaming the entities? (y/N): ")
+    if answer.lower() == "y" or answer.lower() == "yes":
+        websocket_url = f'ws{TLS_S}://{config.HOST}/api/websocket'
+        ws = websocket.WebSocket()
+        ws.connect(websocket_url)
+
+        auth_req = ws.recv()
+
+        # Authenticate with Home Assistant
+        auth_msg = json.dumps({"type": "auth", "access_token": config.ACCESS_TOKEN})
+        ws.send(auth_msg)
+        auth_result = ws.recv()
+        auth_result = json.loads(auth_result)
+        if auth_result["type"] != "auth_ok":
+            print("Authentication failed. Check your access token.")
+            ws.close()
+            return
+
+        # Rename the entities
+        for index, (_, new_friendly_name, entity_id, new_entity_id) in enumerate(renamed_data, start=1):
+            entity_registry_update_msg = json.dumps({
+                "id": index,
+                "type": "config/entity_registry/update",
+                "entity_id": entity_id,
+                "new_entity_id": new_entity_id,
+                "name": new_friendly_name,
+            })
+            ws.send(entity_registry_update_msg)
+            update_result = ws.recv()
+            update_result = json.loads(update_result)
+            if update_result["success"]:
+                print(f"Entity '{entity_id}' renamed successfully!")
+            else:
+                print(f"Failed to rename entity '{entity_id}': {update_result['error']['message']}")
+
+        ws.close()
+    else:
+        print("Renaming process aborted.")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="HomeAssistant Entity Renamer")
     parser.add_argument('--search', dest='search_regex', help='Regular expression for search. Note: Only searches entity IDs.')
     parser.add_argument('--replace', dest='replace_regex', help='Regular expression for replace')
+    parser.add_argument('--file', dest='file', help='Data file for changes')
     args = parser.parse_args()
 
     if args.search_regex:
@@ -137,5 +201,9 @@ if __name__ == "__main__":
                 print(tabulate.tabulate(table, headers="firstrow", tablefmt="github"))
         else:
             print("No entities found matching the search regex.")
+    elif args.file:
+        entity_data = list_entities()
+
+        rename_file(entity_data, args.file)
     else:
         parser.print_help()
